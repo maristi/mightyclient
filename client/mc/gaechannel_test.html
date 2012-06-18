@@ -1,0 +1,376 @@
+<!DOCTYPE html>
+<html>
+<!--
+Copyright 2012 MightyClient Authors. All Rights Reserved.
+
+Use of this source code is governed by the Apache License, Version 2.0.
+See the COPYING file for details.
+
+-->
+<head>
+  <meta http-equiv="X-UA-Compatible" content="IE=edge">
+  <title>Closure Unit Tests - GaeChannel</title>
+  <script src="../../closure-library/closure/goog/base.js"></script>
+  <script src="../deps.js"></script>
+  <script>
+    goog.require('goog.debug.Console');
+    goog.require('goog.testing.events.EventObserver');
+    goog.require('goog.testing.jsunit');
+    goog.require('goog.testing.net.XhrIo');
+    goog.require('goog.testing.MockClock');
+    goog.require('goog.testing.TestQueue');
+    goog.require('mc.GaeChannel');
+  </script>
+</head>
+<body>
+<script>
+// Mock GAE Channel API.
+
+
+var appengine = {};
+
+
+
+appengine.Channel = function(token) {
+  this.token = token;
+};
+
+
+appengine.Channel.prototype.open = function() {
+  return new appengine.Socket(this.token);
+};
+
+
+
+appengine.Socket = function(token) {
+  this.token = token;
+  this.testQueue_ = new goog.testing.TestQueue();
+};
+
+
+appengine.Socket.prototype.simulateOpen = function() {
+  if (goog.isDef(this.onopen)) { this.onopen(); }
+};
+
+
+appengine.Socket.prototype.simulateMessage = function(messageText) {
+  if (goog.isDef(this.onmessage)) { this.onmessage({'data': messageText}); }
+};
+
+
+appengine.Socket.prototype.simulateError = function(errorDescription) {
+  if (goog.isDef(this.onerror)) {
+    this.onerror({description: errorDescription});
+  }
+};
+
+
+appengine.Socket.prototype.close = function() {
+  this.testQueue_.enqueue(['closed']);
+  if (goog.isDef(this.onclose)) { this.onclose(); }
+};
+
+
+goog.debug.Logger.getLogger('mc.GaeChannel').setLevel(
+    goog.debug.Logger.Level.ALL);
+goog.debug.Console.instance = new goog.debug.Console();
+goog.debug.Console.instance.setCapturing(true);
+
+
+var mockClock;
+var channel;
+var clientID = '1';
+var xhrTestQueue;
+var stubs = new goog.testing.PropertyReplacer();
+
+
+var setUp = function() {
+  mockClock = new goog.testing.MockClock();
+  mockClock.install();
+  xhrTestQueue = new goog.testing.TestQueue();
+  channel = new mc.GaeChannel('1', new goog.testing.net.XhrIo(xhrTestQueue));
+};
+
+
+var tearDown = function() {
+  mockClock.uninstall();
+  stubs.reset();
+};
+
+
+var checkAssert = function(f, expectedMsg) {
+  var error = assertThrows(f);
+  assertEquals('Error should have expected message',
+      'Assertion failed: ' + expectedMsg, error.message);
+};
+
+
+var checkForwardChannelRequest = function(xhrTestQueueEvent, messages) {
+  var uri = xhrTestQueueEvent[1];
+  assertEquals('Request should have correct scheme', window.location.protocol,
+      uri.getScheme() + ':');
+  assertEquals('Request should have correct domain', window.location.hostname,
+      uri.getDomain());
+  var port = uri.getPort()
+  assertEquals('Request should have correct port', window.location.port,
+      goog.isNull(port) ? '' : String(port));
+  assertEquals('Request should have correct path', mc.GaeChannel.BASE_URL_PATH,
+      uri.getPath());
+  assertNotUndefined('Request should have randomized query parameter',
+      uri.getParameterValue('zx'));
+  var method = xhrTestQueueEvent[2];
+  assertEquals('Request should have correct method', 'POST', method);
+  var postData = xhrTestQueueEvent[3];
+  assertEquals('Request should have correct post data', [
+    'cid=' + encodeURIComponent(clientID),
+    'm=' + encodeURIComponent(goog.json.serialize(messages))
+  ].join('&'), postData);
+  var headers = xhrTestQueueEvent[4];
+  assertUndefined('Should be no headers added explicitly. XhrIo will add' +
+      '"Content-Type: application/x-www-form-urlencoded;char set=utf-8".',
+      headers);
+};
+
+
+var oneRequestSent = function(messages) {
+  assertFalse('Should have sent a request', xhrTestQueue.isEmpty());
+  var xhrTestQueueEvent = xhrTestQueue.dequeue();
+  assertTrue('Should have sent only one request', xhrTestQueue.isEmpty());
+  checkForwardChannelRequest(xhrTestQueueEvent, messages);
+};
+
+
+var noRequestsSent = function() {
+  assertTrue('XHR not sent', xhrTestQueue.isEmpty());
+};
+
+
+var testForwardChannelSend = function() {
+  channel.send('service1', 'message1', 1);
+  channel.send('service1', 'message2', 1);
+  channel.send('service2', 'message3', 1);
+  mockClock.tick();
+  oneRequestSent(
+      {'service1': ['message1', 'message2'], 'service2': ['message3']});
+  channel.send('service1', 'message4', 1);
+  mockClock.tick()
+  noRequestsSent();
+  channel.xhr_.simulateResponse(200, '');
+  mockClock.tick();
+  oneRequestSent({'service1': ['message4']});
+  channel.xhr_.simulateResponse(200, '');
+  noRequestsSent();
+};
+
+
+var testForwardChannelRetries = function() {
+  stubs.replace(mc.GaeChannel, 'FORWARD_CHANNEL_MAX_RETRIES', 2);
+
+  // Initial request will fail
+  assertEquals(0, channel.forwardChannelRetryCount_);
+  channel.send('service1', 'message1', 1);
+  mockClock.tick();
+  oneRequestSent({'service1': ['message1']});
+  channel.xhr_.simulateResponse(500, '');
+  assertEquals(1, channel.forwardChannelRetryCount_);
+  noRequestsSent();
+
+  // Retry delay is now in progress
+  mockClock.tick();
+  channel.send('service1', 'message2', 1);
+  mockClock.tick()
+  noRequestsSent();
+
+  // The second request will succeed
+  mockClock.tick(mc.GaeChannel.RETRY_DELAY - 2);
+  oneRequestSent({'service1': ['message1', 'message2']});
+  channel.xhr_.simulateResponse(200, '');
+  assertEquals(0, channel.forwardChannelRetryCount_);
+  mockClock.tick()
+  noRequestsSent();
+
+  // Test reaching maximum number of retries
+  channel.send('service1', 'message3', 1);
+  mockClock.tick();
+  oneRequestSent({'service1': ['message3']});
+  for (var retryCount = 1; retryCount <=
+      mc.GaeChannel.FORWARD_CHANNEL_MAX_RETRIES; retryCount++) {
+    channel.xhr_.simulateResponse(500, '');
+    mockClock.tick();
+    assertEquals(retryCount, channel.forwardChannelRetryCount_);
+    noRequestsSent();
+    mockClock.tick(mc.GaeChannel.RETRY_DELAY - 1);
+    oneRequestSent({'service1': ['message3']});
+  }
+  var observer = new goog.testing.events.EventObserver();
+  goog.events.listen(channel, mc.Channel.EventType.SUSPENDED_CHANGE,
+      observer);
+  channel.xhr_.simulateResponse(500, '');
+  assertEquals('Should have fired once', 1, observer.getEvents().length);
+  mockClock.tick()
+  noRequestsSent();
+  assertEquals(0, channel.forwardChannelRetryCount_);
+  assertTrue(channel.isSuspended());
+};
+
+
+var testRelayingMessages = function() {
+  var scope = {};
+  var receivedMessages = {'service1': [], 'service2': []};
+  channel.registerService('service1', function(payload) {
+    assertEquals('Callback should be called with correct scope object',
+        scope, this);
+    receivedMessages['service1'].push(payload);
+  }, scope);
+  checkAssert(function() {
+    channel.registerService('service1', function() {});
+  }, 'Service \'service1\' already registered.');
+  channel.registerService('service2', function(payload) {
+    assertEquals('Callback should be called with correct scope object',
+        scope, this);
+    receivedMessages['service2'].push(payload);
+  }, scope);
+  var messages = {
+    'service1': ['message1', 'message2'],
+    'service2': ['message3']
+  };
+  channel.relayIncomingMessages_(messages);
+  assertObjectEquals('Should have called correct callbacks', messages,
+      receivedMessages);
+  checkAssert(function() {
+    channel.relayIncomingMessages_({'service3': ['message4']});
+  }, 'Received a message for service \'service3\' which is not registered.');
+};
+
+
+var testForwardChannelResponseHandling = function() {
+  var hasReceivedMessage = false;
+  channel.registerService('service1', function(payload) {
+    assertEquals('Should have received correct message', 'message2', payload);
+    assertFalse('Should receive message only once', hasReceivedMessage);
+    hasReceivedMessage = true;
+  });
+  channel.send('service1', 'message1', 1);
+  mockClock.tick();
+  oneRequestSent({'service1': ['message1']});
+  assertFalse('Message not yet received', hasReceivedMessage);
+  channel.xhr_.simulateResponse(200, goog.json.serialize({
+    'service1': ['message2']
+  }));
+  mockClock.tick()
+  assertTrue('Must have received message', hasReceivedMessage);
+  noRequestsSent();
+};
+
+
+var testSocket = function() {
+  // Test socket opening
+  channel.openBackwardChannel();
+  checkAssert(function() {
+    channel.openBackwardChannel();
+  }, 'openBackwardChannel already called.');
+  mockClock.tick();
+  var messages = {};
+  messages[mc.GaeChannel.SYSTEM_SERVICE_] = [{'getToken': null}];
+  oneRequestSent(messages);
+  messages = {};
+  messages[mc.GaeChannel.SYSTEM_SERVICE_] = [{'token': 'token1'}];
+  assertNull('Socket must not be created', channel.socket_);
+  channel.xhr_.simulateResponse(200, goog.json.serialize(messages));
+  assertNotNull('Socket must have been created', channel.socket_);
+  assertEquals('token1', channel.socket_.token);
+  mockClock.tick();
+  assertTrue(channel.socketTimeout_.isActive());
+  channel.socket_.simulateOpen();
+  assertFalse(channel.socketTimeout_.isActive());
+
+  // Test socket message
+  var receivedMessages = [];
+  channel.registerService('service1', function(payload) {
+    receivedMessages.push(payload);
+  });
+  channel.socket_.simulateMessage(goog.json.serialize(
+      {'service1': ['message1']}));
+  assertObjectEquals('Should have received the message', ['message1'],
+      receivedMessages);
+
+  // Test socket error
+  var socket = channel.socket_;
+  noRequestsSent();
+  socket.simulateError('descr');
+  assertObjectEquals('Socket must have been closed', ['closed'],
+      socket.testQueue_.dequeue());
+  noRequestsSent();
+  assertNull(channel.socket_);
+  mockClock.tick();
+  messages = {};
+  messages[mc.GaeChannel.SYSTEM_SERVICE_] = [{'getToken': null}];
+  oneRequestSent(messages);
+
+  // Test socket opening timeout
+  messages = {};
+  messages[mc.GaeChannel.SYSTEM_SERVICE_] = [{'token': 'token2'}];
+  assertNull(channel.socket_);
+  channel.xhr_.simulateResponse(200, goog.json.serialize(messages));
+  assertNotNull('Socket must have been created', channel.socket_);
+  assertEquals('token2', channel.socket_.token);
+  mockClock.tick(mc.GaeChannel.SOCKET_OPEN_TIMEOUT);
+  assertTrue(channel.isSuspended());
+  assertNull(channel.socket_);
+};
+
+
+var testPickup = function() {
+  channel.handleSystemServiceMessage_({'pickup': 'abc'});
+  mockClock.tick();
+  var messages = {};
+  messages[mc.GaeChannel.SYSTEM_SERVICE_] = [{'pickup': 'abc'}];
+  oneRequestSent(messages);
+};
+
+
+var testSuspendedState = function() {
+  channel.suspended_ = true;
+  channel.send('service1', 'message1', 1);
+  mockClock.tick();
+  noRequestsSent();
+  channel.unsuspend();
+  assertFalse(channel.isSuspended());
+  oneRequestSent({'service1': ['message1']});
+  channel.suspended_ = true;
+  channel.xhr_.simulateResponse(500, '');
+  mockClock.tick();
+  noRequestsSent();
+  channel.handleSystemServiceMessage_({'token': 'token1'});
+  assertNull('Must not open socket', channel.socket_);
+  var observer = new goog.testing.events.EventObserver();
+  goog.events.listen(channel, mc.Channel.EventType.SUSPENDED_CHANGE,
+      observer);
+  channel.unsuspend();
+  assertEquals('Should have fired once', 1, observer.getEvents().length);
+  assertFalse(channel.isSuspended());
+  var messages = {'service1': ['message1']};
+  messages[mc.GaeChannel.SYSTEM_SERVICE_] = [{'getToken': null}];
+  oneRequestSent(messages);
+};
+
+
+var testDispose = function() {
+  channel.openBackwardChannel();
+  channel.handleSystemServiceMessage_({'token': 'token1'});
+  var socket = channel.socket_;
+  socket.simulateOpen();
+  assertTrue(socket.testQueue_.isEmpty());
+  channel.dispose();
+  assertTrue(channel.xhr_.isDisposed());
+  assertTrue(channel.sendDelay_.isDisposed());
+  assertTrue(channel.retryDelay_.isDisposed());
+  assertTrue(channel.socketTimeout_.isDisposed());
+  assertObjectEquals('Socket must have been closed', ['closed'],
+      socket.testQueue_.dequeue());
+};
+
+
+</script>
+</body>
+</html>

@@ -1,0 +1,1132 @@
+<!DOCTYPE html>
+<html>
+<!--
+Copyright 2012 MightyClient Authors. All Rights Reserved.
+
+Use of this source code is governed by the Apache License, Version 2.0.
+See the COPYING file for details.
+
+-->
+<head>
+  <meta http-equiv="X-UA-Compatible" content="IE=edge">
+  <title>Closure Unit Tests - Datasource</title>
+  <script src="../../closure-library/closure/goog/base.js"></script>
+  <script src="../deps.js"></script>
+  <script>
+    goog.require('goog.testing.events.EventObserver');
+    goog.require('goog.testing.jsunit');
+    goog.require('goog.testing.MockClock');
+    goog.require('goog.testing.PropertyReplacer');
+    goog.require('mc.ds');
+  </script>
+</head>
+<body>
+<script>
+var stubs = new goog.testing.PropertyReplacer();
+var mockClock;
+
+
+var setUp = function() {
+  stubs.replace(mc.ds, 'schema_', {});
+  mockClock = new goog.testing.MockClock();
+  mockClock.install();
+};
+
+
+var tearDown = function() {
+  stubs.reset();
+  mockClock.uninstall();
+};
+
+
+var checkAssert = function(f, expectedMsg) {
+  var error = assertThrows(f);
+  assertEquals('Error should have expected message',
+      'Assertion failed: ' + expectedMsg, error.message);
+};
+
+
+
+/**
+ * A mock implementation of mc.Channel.
+ * @constructor
+ * @extends {mc.Channel}
+ */
+MockChannel = function() {
+  goog.base(this);
+
+
+  /**
+   * Records the calls to send().
+   * @type {!goog.testing.events.EventObserver}
+   */
+  this.sentMessages_ = new goog.testing.events.EventObserver();
+};
+goog.inherits(MockChannel, mc.Channel);
+
+
+/** @inheritDoc */
+MockChannel.prototype.sendInternal = function(service, payload) {
+  this.sentMessages_.handleEvent({service: service, payload: payload});
+};
+
+
+var getRootNode = function(opt_data, opt_diskVersion) {
+  var channel = new MockChannel();
+  var rootNode = new mc.ds.RootNode(channel, 'service1');
+  rootNode.connect();
+  var events = channel.sentMessages_.getEvents();
+  assertEquals(1, events.length);
+  var requestToken = events[0].payload['init'][1]
+  // Flush sentMessages_
+  channel.sentMessages_ = new goog.testing.events.EventObserver();
+  channel.handleIncomingMessage('service1',
+      {'init_success': [requestToken, 'abc', opt_diskVersion || 2,
+      opt_data || {}, []]});
+  return rootNode;
+};
+
+
+var testSetValueByKeys = function() {
+  var obj = {};
+  var retval = mc.ds.setValueByKeys(obj, ['a', 'b', 'c'], 1);
+  assertObjectEquals({'a': {'b': {'c': 1}}}, obj);
+  assertUndefined(retval);
+  var retval = mc.ds.setValueByKeys(obj, ['a', 'd'], 2);
+  assertObjectEquals({'a': {'b': {'c': 1}, 'd': 2}}, obj);
+  assertUndefined(retval);
+  retval = mc.ds.setValueByKeys(obj, ['a', 'b', 'c']);
+  assertObjectEquals({'a': {'d': 2}}, obj);
+  assertEquals(1, retval);
+  retval = mc.ds.setValueByKeys(obj, ['a', 'd']);
+  assertObjectEquals({}, obj);
+  assertEquals(2, retval);
+  checkAssert(function() {
+    mc.ds.setValueByKeys({'a': 1}, ['a', 'b'], 2);
+  }, 'No prefix of the path should point to a primitive value.');
+  checkAssert(function() {
+    mc.ds.setValueByKeys({'a': 1}, ['a', 'b']);
+  }, 'No prefix of the path should point to a primitive value.');
+};
+
+
+var testSetValueByKeysIfUndefined = function() {
+  var obj = {};
+  var retval = mc.ds.setValueByKeysIfUndefined(obj, ['a', 'b', 'c'], 1);
+  assertObjectEquals({'a': {'b': {'c': 1}}}, obj);
+  assertEquals(1, retval);
+  var retval = mc.ds.setValueByKeysIfUndefined(obj, ['a', 'b', 'c'], 2);
+  assertObjectEquals({'a': {'b': {'c': 1}}}, obj);
+  assertEquals(1, retval);
+  checkAssert(function() {
+    mc.ds.setValueByKeys({'a': 1}, ['a', 'b'], 2);
+  }, 'No prefix of the path should point to a primitive value.');
+};
+
+
+var testForEach = function() {
+  var obj = {
+    'a0': 'a',
+    'b0': {
+      'a1': 'ba',
+      'b1': 'bb',
+      'c1': {
+        'a2': 'bca'
+      }
+    },
+    'c0': {
+      'a1': 'ca'
+    },
+    'd0': {
+      'b1': 'db'
+    }
+  };
+  var elements = {};
+  var scope = {};
+  var callback = function(el, path) {
+    var pathStr = path.join('/');
+    elements[pathStr] = el;
+    assertEquals(scope, this);
+  };
+  mc.ds.forEach(obj, [], callback, scope);
+  assertObjectEquals('Should have iterated over correct elements',
+      {'': obj}, elements);
+  elements = {};
+  mc.ds.forEach({}, ['a0'], callback, scope);
+  assertObjectEquals('Should have iterated over correct elements',
+      {}, elements);
+  elements = {};
+  mc.ds.forEach(obj, ['b0', 'c1', 'a2'], callback, scope);
+  assertObjectEquals('Should have iterated over correct elements',
+      {'b0/c1/a2': 'bca'}, elements);
+  elements = {};
+  mc.ds.forEach(obj, ['*', 'a1'], callback, scope);
+  assertObjectEquals('Should have iterated over correct elements',
+      {'b0/a1': 'ba', 'c0/a1': 'ca'}, elements);
+  elements = {};
+  mc.ds.forEach(obj, ['*', 'a1'], callback, scope, {'c0': null});
+  assertObjectEquals('Should have iterated over correct elements',
+      {'b0/a1': 'ba'}, elements);
+  checkAssert(function() {
+    mc.ds.forEach(obj, ['c0'], callback, scope, {'c0': null});
+  }, 'Path must not contain any of the keys in opt_leafKeys');
+};
+
+
+var testAssertValidPathElement = function() {
+  var checkPathEl = function(pathEl, expectedMsg) {
+    checkAssert(function() {
+      mc.ds.assertValidPathElement(pathEl);
+    }, expectedMsg);
+  };
+  checkPathEl([], 'Path element must be a string.');
+  checkPathEl('', 'Path element string must not be zero-length.');
+  checkPathEl('abc/', 'Path element must not contain a slash (\'/\').');
+  checkPathEl('.',
+      'Path element must not be one of the keys in mc.ds.LEAF_KEYS.');
+  mc.ds.assertValidPathElement('abc1_');
+  mc.ds.assertValidPathElement('*');
+  mc.ds.assertValidPathElement('@');
+  mc.ds.assertValidPathElement('#');
+};
+
+
+var testAssertValidPath = function() {
+  var checkPath = function(path, expectedMsg) {
+    checkAssert(function() {
+      mc.ds.assertValidPath(path, true);
+    }, expectedMsg);
+  };
+  checkPath({}, 'Path must be an array.');
+  checkPath('abc', 'Path must be an array.');
+  checkPath(['*'], 'Path is not fully qualified.');
+  mc.ds.assertValidPath(['abc', 'abc']);
+};
+
+
+var testDecodePath = function() {
+  assertArrayEquals([], mc.ds.decodePath(''));
+  assertArrayEquals(['a', 'b'], mc.ds.decodePath('a/b'));
+};
+
+
+var testDecodeValue = function() {
+  assertEquals(true, mc.ds.decodeValue_(true));
+  assertEquals(1, mc.ds.decodeValue_(1));
+  assertEquals('abc', mc.ds.decodeValue_('abc'));
+  assertEquals('20120201',
+      mc.ds.decodeValue_({'%': '20120201'}).toUTCIsoString());
+  assertEquals('20120202T060000',
+      mc.ds.decodeValue_({'^': '20120202T060000'}).toUTCIsoString());
+  assertObjectEquals({'a': 1}, mc.ds.decodeValue_({'&': {'a': 1}}));
+};
+
+
+var testEncodeValue = function() {
+  assertEquals(true, mc.ds.encodeValue_(true));
+  assertEquals(1, mc.ds.encodeValue_(1));
+  assertEquals('abc', mc.ds.encodeValue_('abc'));
+  assertObjectEquals({'%': '20120201'},
+      mc.ds.encodeValue_(new goog.date.Date(2012, 1, 1)));
+  assertObjectEquals({'^': '20120202T060000'},
+      mc.ds.encodeValue_(new goog.date.DateTime(2012, 1, 2, 1)));
+  assertObjectEquals({'&': {'a': 1}},
+      mc.ds.encodeValue_({'a': 1}));
+};
+
+
+var testGetNode = function() {
+  // Schema-based checks are tested in a separate test case.
+
+  var rootNode = getRootNode();
+
+  // Test getNode
+  assertEquals(rootNode, rootNode.getNode([]));
+  var node1 = rootNode.getNode(['a0', 'a1']);
+  var node2 = node1.getNode(['a2']);
+  assertEquals('Returned node should be correct instance', node2,
+      rootNode.getNode(['a0', 'a1', 'a2']));
+  assertEquals('Node must point to correct root node', rootNode,
+      node2.getRootNode());
+  assertArrayEquals('Node must have correct path', ['a0', 'a1', 'a2'],
+      node2.getPath());
+  rootNode.set(['a0', 'a1', 'a2', 'a3'], 1);
+  assertObjectEquals('Node should point to correct data.',
+      1, node2.get(['a3']));
+};
+
+
+var testForEachNode = function() {
+  // Schema-based checks are tested in a separate test case.
+
+  var rootNode = getRootNode();
+
+  var nodes = {};
+  var node1 = rootNode.getNode(['a0', 'a1']);
+  var node2 = node1.getNode(['a2']);
+  var node3 = node1.getNode(['b2']);
+  var count = 0;
+  var scope = {};
+  node1.forEachNode(['*'], function(node, path) {
+    nodes[path.join('/')] = node;
+    count++;
+    assertEquals(scope, this);
+  }, scope);
+  assertEquals('Should have done correct # of iterations', 2, count);
+  assertEquals('Should have passed correct argument to callback',
+      node2, nodes['a2']);
+  assertEquals('Should have passed correct argument to callback',
+      node3, nodes['b2']);
+  nodes = {};
+  count = 0;
+  node1.forEachNode([], function(node, path) {
+    nodes[path.join('/')] = node;
+    count++;
+    assertEquals(scope, this);
+  }, scope, true);
+  assertEquals('Should have done correct # of iterations', 3, count);
+  assertEquals('Should have passed correct argument to callback',
+      node1, nodes['']);
+  assertEquals('Should have passed correct argument to callback',
+      node2, nodes['a2']);
+  assertEquals('Should have passed correct argument to callback',
+      node3, nodes['b2']);
+
+};
+
+
+var testNodeDisposal = function() {
+  var rootNode = getRootNode();
+  node = rootNode.getNode(['a0', 'a1', 'a2']);
+  node.dispose();
+  assertNotEquals('Should now return a different node instance',
+      node, rootNode.getNode(['a0', 'a1', 'a2']));
+};
+
+
+var testGetSet = function() {
+  // Schema-based checks are tested in a separate test case.
+
+  var rootNode = getRootNode();
+  var event;
+  var source = {};
+  rootNode.listen(['a0', 'a1'], function(event_) {
+    checkAssert(function() {
+      rootNode.set([], 1);
+    }, 'set() must not be called by a callback to mc.ds.Change event.');
+    event = event_;
+  });
+
+  assertObjectEquals(null, rootNode.getNode(['a0']).get(['a1']));
+  var oldValue = rootNode.getNode(['a0']).set(['a1'], {'a': 1}, source);
+  assertObjectEquals(null, oldValue);
+  assertObjectEquals(null, event.oldValue);
+  assertObjectEquals({'a': 1}, event.newValue);
+  assertEquals(source, event.source);
+  assertArrayEquals(['a0', 'a1'], event.path);
+  assertObjectEquals({'a': 1}, rootNode.getNode(['a0']).get(['a1']));
+
+  oldValue = rootNode.getNode(['a0']).set(['a1'], {'a': 2});
+  assertObjectEquals({'a': 1}, oldValue);
+  assertObjectEquals({'a': 1}, event.oldValue);
+  assertObjectEquals({'a': 2}, event.newValue);
+
+  oldValue = rootNode.getNode(['a0']).set(['a1'], null);
+  assertObjectEquals({'a': 2}, oldValue);
+  assertObjectEquals({'a': 2}, event.oldValue);
+  assertObjectEquals(null, event.newValue);
+
+  var retval = rootNode.getNode(['a0']).set_(['a1'], {'a': 3},
+      mc.ds.encodeValue_({'a': 3}));
+  assertObjectEquals({encodedOldValue: null, oldValue: null}, retval);
+
+  retval = rootNode.getNode(['a0']).set_(['a1'], null, null);
+  assertObjectEquals({encodedOldValue: mc.ds.encodeValue_({'a': 3}),
+      oldValue: {'a': 3}}, retval);
+
+};
+
+
+var testForEachValue = function() {
+  // Schema-based checks are tested in a separate test case.
+
+  var rootNode = getRootNode();
+  rootNode.set(['a0', 'a1'], {'a': 1});
+  rootNode.set(['a0', 'b1'], {'a': 2});
+  rootNode.set(['a0', 'a1', 'a2'], {'a': 3});
+  var values = {};
+  var count = 0;
+  var scope = {};
+  var callback = function(value, path) {
+    values[path.join('/')] = value;
+    count++;
+    assertEquals(scope, this);
+  };
+  rootNode.getNode(['a0', 'a1']);
+  rootNode.getNode(['a0']).forEach(['*'], callback, scope);
+  assertEquals('Should have done correct # of iterations', 2, count);
+  assertObjectEquals('Should have passed correct argument to callbacks',
+      {'a1': {'a': 1}, 'b1': {'a': 2}}, values);
+
+  values = {};
+  count = 0;
+  rootNode.getNode(['a0']).forEach(['*'], callback, scope, true);
+  assertEquals('Should have done correct # of iterations', 3, count);
+  assertObjectEquals('Should have passed correct argument to callbacks',
+      {'a1': {'a': 1}, 'b1': {'a': 2}, 'a1/a2': {'a': 3}}, values);
+};
+
+
+var testEvents = function() {
+  // Schema-based checks are tested in a separate test case.
+
+  var contextObj = {};
+  var calledListeners = [];
+  var eventPath;
+  // Returns a function that adds id to calledListeners
+  // each time the listener is called, and checks event object properties.
+  var getCallback = function(id) {
+    return function(e) {
+      assertEquals('Callback should be called in correct context',
+          contextObj, this);
+      assertArrayEquals('Event should have correct path', eventPath,
+          e.path);
+      calledListeners.push(id);
+    };
+  };
+  var rootNode = getRootNode();
+  var listeners = [];
+  listeners.push(rootNode.listen([], getCallback(0), contextObj));
+  listeners.push(rootNode.listen(['a0', 'a1'], getCallback(1), contextObj));
+  listeners.push(rootNode.listen(['a0', 'b1'], getCallback(2), contextObj));
+  listeners.push(rootNode.listen(['a0', '*'], getCallback(3), contextObj));
+  listeners.push(rootNode.listen(['a0', 'b1', 'a2'], getCallback(4),
+      contextObj));
+  listeners.push(rootNode.listen(['a0'], getCallback(5),
+      contextObj, true));
+
+  eventPath = [];
+  rootNode.dispatchEvent(new mc.ds.Event(eventPath));
+  assertSameElements('Correct listeners should have been called',
+      [0], calledListeners);
+
+  calledListeners = [];
+  eventPath = ['a0', 'a1'];
+  rootNode.dispatchEvent(new mc.ds.Event(eventPath));
+  assertSameElements('Correct listeners should have been called',
+      [1, 3, 5], calledListeners);
+
+  calledListeners = [];
+  eventPath = ['a0', '*'];
+  rootNode.dispatchEvent(new mc.ds.Event(eventPath));
+  assertSameElements('Correct listeners should have been called',
+      [1, 2, 3, 5], calledListeners);
+
+  calledListeners = [];
+  eventPath = ['a0'];
+  rootNode.dispatchEvent(new mc.ds.Event(eventPath));
+  assertSameElements('Correct listeners should have been called',
+      [5], calledListeners);
+
+  calledListeners = [];
+  goog.array.forEach(listeners,
+      function(listener) { listener.dispose(); });
+  eventPath = ['a0', '*'];
+  rootNode.dispatchEvent(new mc.ds.Event(eventPath));
+  assertSameElements('Correct listeners should have been called',
+      [], calledListeners);
+};
+
+
+var testTransaction = function() {
+  var rootNode = getRootNode();
+  var count = 0;
+  stubs.replace(mc.ds.RootNode.prototype, 'startOrStopSendDelay_',
+      function() { count++; });
+
+  assertNull(rootNode.transaction_);
+  rootNode.inTransaction(function() {});
+  assertFalse('Should not have called startOrStopSendDelay_', count > 0);
+  assertNull(rootNode.transaction_);
+
+  var scope = {};
+  rootNode.inTransaction(function() {
+    assertFalse('Should not have called startOrStopSendDelay_', count > 0);
+    assertEquals(scope, this);
+    rootNode.set([], 1);
+    rootNode.set([], 2);
+  }, scope);
+  assertNull(rootNode.transaction_);
+  assertTrue('Should have called startOrStopSendDelay_', count > 0);
+  assertObjectEquals([[
+    {path: [], oldValue: null, newValue: 1},
+    {path: [], oldValue: 1, newValue: 2}
+  ]], rootNode.bufferedUpdates_);
+};
+
+
+var testHoldHorses = function() {
+  var rootNode = getRootNode();
+  var count = 0;
+  stubs.replace(mc.ds.RootNode.prototype, 'startOrStopSendDelay_',
+      function() { count++; });
+  assertFalse(rootNode.areHorsesHeld());
+  rootNode.holdHorses();
+  assertTrue('Should have called startOrStopSendDelay_', count > 0);
+  assertTrue(rootNode.areHorsesHeld());
+  count = 0;
+  rootNode.releaseHorses();
+  assertTrue('Should have called startOrStopSendDelay_', count > 0);
+  assertFalse(rootNode.areHorsesHeld());
+};
+
+
+var testBuffer = function() {
+  var rootNode = getRootNode();
+  var count = 0;
+  stubs.replace(mc.ds.RootNode.prototype, 'startOrStopSendDelay_',
+      function() { count++; });
+
+  var observer = new goog.testing.events.EventObserver();
+  goog.events.listen(rootNode.getEventTarget(),
+      mc.ds.RootNode.EventType.SAVED_STATUS_CHANGE, observer);
+  var date = new goog.date.Date(2012, 2, 2);
+  rootNode.set(['a'], date);
+  assertEquals('Should have fired once', 1, observer.getEvents().length);
+  assertEquals('Should have called startOrStopSendDelay_', count, 1);
+
+  rootNode.set(['a'], 2);
+
+  assertEquals('Should not have fired again', 1, observer.getEvents().length);
+  assertFalse(rootNode.areChangesSaved());
+
+  assertObjectEquals([
+    [{path: ['a'], oldValue: null, newValue: mc.ds.encodeValue_(date)}],
+    [{path: ['a'], oldValue: mc.ds.encodeValue_(date), newValue: 2}]
+  ], rootNode.bufferedUpdates_);
+};
+
+
+var testSend = function() {
+  var rootNode = getRootNode();
+  var updates = [
+    [
+      {path: ['a0', 'a1'], oldValue: null, newValue: mc.ds.encodeValue_([1])},
+      {path: ['a0', 'b1'], oldValue: null, newValue: null}
+    ],
+    [
+      {path: ['a0', 'c1'], oldValue: null, newValue: mc.ds.encodeValue_([2])}
+    ]
+  ];
+  rootNode.bufferedUpdates_ = updates;
+  rootNode.send_();
+  assertObjectEquals('Should have sent correct message', [
+    {
+      service: 'service1',
+      payload: {'updates': [
+        'abc',
+        2,
+        [
+          [
+            ['a0/a1', mc.ds.encodeValue_([1])],
+            ['a0/b1', null]
+          ],
+          [
+            ['a0/c1', mc.ds.encodeValue_([2])]
+          ],
+        ]
+      ]}
+    }
+  ], rootNode.channel_.sentMessages_.getEvents());
+  assertObjectEquals(updates, rootNode.sentUpdates_);
+  assertObjectEquals([], rootNode.bufferedUpdates_);
+};
+
+
+var testApplyReceivedUpdates = function() {
+  var rootNode = getRootNode({}, 1);
+  rootNode.diskVersion_ = 2;
+  var date = new goog.date.Date(2012, 2, 2);
+  rootNode.receivedUpdates_ = {
+    5: {path: ['a'], newValue: mc.ds.encodeValue_(date)},
+    7: {path: ['b'], newValue: 2}
+  };
+  rootNode.committedUpdates_ = [
+    [
+      {path: ['c'], newValue: 4, oldValue: null, version: 2}
+    ],
+    [
+      {path: ['c'], newValue: 3, oldValue: 4, version: 3},
+      {path: ['c'], newValue: 7, oldValue: 3, version: 4}
+    ],
+    [
+      {path: ['c'], newValue: 5, oldValue: 6, version: 8}
+    ]
+  ];
+
+  rootNode.sentUpdates_ = [
+    [{path: ['c'], newValue: 9, oldValue: 5}]
+  ];
+  rootNode.applyReceivedUpdates_();
+  // Nothing done.
+  assertEquals(1, rootNode.version_);
+
+  rootNode.sentUpdates_ = [];
+  rootNode.applyReceivedUpdates_();
+  assertEquals(5, rootNode.version_);
+  assertObjectEquals({7: {path: ['b'], newValue: 2}},
+      rootNode.receivedUpdates_);
+  assertObjectEquals([[{path: ['c'], newValue: 5, oldValue: 6, version: 8}]],
+      rootNode.committedUpdates_);
+  assertObjectEquals({
+    5: {path: ['a'], newValue: mc.ds.encodeValue_(date), oldValue: null,
+        local: false},
+    4: {path: ['c'], newValue: 7, oldValue: 3, local: true},
+    3: {path: ['c'], newValue: 3, oldValue: 4, local: true}
+  }, rootNode.unsavedUpdates_);
+  assertEquals('Value should have been set', date.getTime(),
+      rootNode.get(['a']).getTime());
+  assertNull('Value should not have been set', rootNode.get(['b']));
+};
+
+
+var testProcessServerUpdates = function() {
+  var rootNode = getRootNode();
+  assertObjectEquals({}, rootNode.receivedUpdates_);
+  assertEquals(2, rootNode.version_);
+  rootNode.processServerUpdates_([
+    ['a0/a1', 'a', 1],
+    ['a0/b1', 'b', 3],
+    ['a0/c1', 'c', 4]
+  ]);
+  assertObjectEquals({
+    '3': {path: ['a0', 'b1'], newValue: 'b'},
+    '4': {path: ['a0', 'c1'], newValue: 'c'}
+  }, rootNode.receivedUpdates_);
+};
+
+
+var testFlush = function() {
+  var data = {'a': {}, 'b': {}};
+  data['a'][mc.ds.DATA_KEYS_.VALUE] = mc.ds.encodeValue_([0]);
+  data['b'][mc.ds.DATA_KEYS_.VALUE] = mc.ds.encodeValue_([3]);
+  var rootNode = getRootNode(data, 2);
+  var count = 0;
+  stubs.replace(mc.ds.RootNode.prototype, 'startOrStopSendDelay_',
+      function() { count++; });
+  rootNode.set(['a'], [1]);
+  rootNode.set(['a'], [2]);
+  rootNode.processServerUpdates_([
+    ['b', mc.ds.encodeValue_([4]), 3],
+    ['b', mc.ds.encodeValue_([5]), 4]
+  ]);
+  rootNode.applyReceivedUpdates_();
+  assertEquals(false, rootNode.lastChangesSavedStatus_);
+  assertEquals(4, rootNode.version_);
+  assertEquals(2, rootNode.diskVersion_);
+  count = 0;
+  var observer = new goog.testing.events.EventObserver();
+  goog.events.listen(rootNode.getEventTarget(),
+      mc.ds.RootNode.EventType.ROLLBACK, observer);
+  goog.events.listen(rootNode.getEventTarget(),
+      mc.ds.RootNode.EventType.SAVED_STATUS_CHANGE, observer);
+  rootNode.flush_();
+  assertEquals(2, rootNode.version_);
+  assertEquals(2, rootNode.diskVersion_);
+  assertObjectEquals([], rootNode.bufferedUpdates_);
+  assertObjectEquals([], rootNode.sentUpdates_);
+  assertObjectEquals([], rootNode.committedUpdates_);
+  assertObjectEquals({}, rootNode.receivedUpdates_);
+  assertObjectEquals({}, rootNode.unsavedUpdates_);
+  assertObjectEquals([0], rootNode.get(['a']));
+  assertObjectEquals([3], rootNode.get(['b']));
+  assertEquals(true, rootNode.lastChangesSavedStatus_);
+  assertEquals(1,
+      observer.getEvents(mc.ds.RootNode.EventType.ROLLBACK).length);
+  assertEquals(1,
+      observer.getEvents(mc.ds.RootNode.EventType.SAVED_STATUS_CHANGE).length);
+  assertEquals('startOrStopSendDelay_ called once', 1, count);
+};
+
+
+var testAdvanceDiskVersion = function() {
+  var rootNode = getRootNode();
+  rootNode.processServerUpdates_([
+    ['b', mc.ds.encodeValue_([4]), 3],
+    ['b', mc.ds.encodeValue_([5]), 4]
+  ]);
+  rootNode.applyReceivedUpdates_();
+  rootNode.lastChangesSavedStatus_ = false;
+  assertEquals(4, rootNode.version_);
+  assertEquals(2, rootNode.diskVersion_);
+  var observer = new goog.testing.events.EventObserver();
+  goog.events.listen(rootNode.getEventTarget(),
+      mc.ds.RootNode.EventType.SAVED_STATUS_CHANGE, observer);
+  assertEquals(2, goog.object.getCount(rootNode.unsavedUpdates_))
+  rootNode.advanceDiskVersion_(3);
+  assertEquals(1, goog.object.getCount(rootNode.unsavedUpdates_))
+  assertEquals(true, rootNode.lastChangesSavedStatus_);
+  rootNode.advanceDiskVersion_(5);
+  assertEquals(0, goog.object.getCount(rootNode.unsavedUpdates_))
+  assertEquals(true, rootNode.lastChangesSavedStatus_);
+};
+
+
+var testInitialization = function() {
+  var channel = new MockChannel();
+  var rootNode = new mc.ds.RootNode(channel, 'service1');
+  var handleOutcomesMessageCalls = [];
+  rootNode.handleOutcomesMessage_ = function(payload) {
+    handleOutcomesMessageCalls.push(payload);
+  };
+  var processServerUpdatesCalls = [];
+  rootNode.processServerUpdates_ = function(updates) {
+    processServerUpdatesCalls.push(updates);
+  };
+  var applyReceivedUpdatesCallCount = 0;
+  rootNode.applyReceivedUpdates_ = function() {
+    applyReceivedUpdatesCallCount++;
+  };
+  var observer = new goog.testing.events.EventObserver();
+  goog.events.listen(rootNode.getEventTarget(),
+      mc.ds.RootNode.EventType.INITIALIZED, observer);
+
+  rootNode.connect();
+  assertObjectEquals('Should have sent correct message', [
+    {
+      service: 'service1',
+      payload: {'init': [null, rootNode.initRequestToken_]}
+    }
+  ], rootNode.channel_.sentMessages_.getEvents());
+  channel.sentMessages_.events_ = [];
+  channel.handleIncomingMessage('service1', {'outcomes': 1});
+  channel.handleIncomingMessage('service1', {'outcomes': 2});
+  assertTrue('handleOutcomesMessage_ wasn\'t called',
+      handleOutcomesMessageCalls.length == 0);
+
+  var data = {'a': {}};
+  data['a'][mc.ds.DATA_KEYS_.VALUE] = 1;
+  channel.handleIncomingMessage('service1',
+      {'init_success': ['wrong_token', 'abc', 2, data, ['update']]});
+  assertTrue('INITIALIZED wasn\'t dispatched',
+      observer.getEvents().length == 0);
+  channel.handleIncomingMessage('service1',
+      {'init_success': [rootNode.initRequestToken_, 'abc', 2, data,
+      ['update']]});
+  assertNull(rootNode.initRequestToken_);
+  assertEquals('abc', rootNode.inMemoryStateToken_);
+  assertEquals(2, rootNode.version_);
+  assertEquals(2, rootNode.diskVersion_);
+  assertObjectEquals(data, rootNode.data_);
+  assertTrue(rootNode.isInitialized());
+  assertTrue('INITIALIZED was dispatched once',
+      observer.getEvents().length == 1);
+  assertObjectEquals('Should have made correct calls to processServerUpdates_',
+      [['update']], processServerUpdatesCalls);
+  assertObjectEquals('Should have made 1 call to applyReceivedUpdates_',
+      1, applyReceivedUpdatesCallCount);
+  assertObjectEquals('Should have made correct calls to handleOutcomesMessage_',
+      [{'outcomes': 1}, {'outcomes': 2}], handleOutcomesMessageCalls);
+
+  // Check that now non-init messages aren't buffered:
+  handleOutcomesMessageCalls = [];
+  channel.handleIncomingMessage('service1', {'outcomes': 3});
+  assertObjectEquals('Should have made correct calls to handleOutcomesMessage_',
+      [{'outcomes': 3}], handleOutcomesMessageCalls);
+};
+
+
+var testCheckForUpdates = function() {
+  var rootNode = getRootNode();
+  var flushCallCount = 0;
+  rootNode.flush_ = function() {
+    flushCallCount++;
+  };
+
+  rootNode.sendInitRequest_(2);
+  rootNode.handleInitSuccessMessage_({'init_success': [
+      rootNode.initRequestToken_, 'new_token', 2, null, []]});
+  assertObjectEquals('Should have made 1 call to flush_',
+      1, flushCallCount);
+
+  rootNode.sendInitRequest_(2);
+  assertEquals(2, rootNode.diskVersion_);
+  assertEquals('abc', rootNode.inMemoryStateToken_);
+  rootNode.handleInitSuccessMessage_({'init_success': [
+      rootNode.initRequestToken_, 'abc', 3, null, []]});
+  assertEquals(3, rootNode.diskVersion_);
+};
+
+
+var testInitTimeout = function() {
+  var rootNode = getRootNode();
+  var observer = new goog.testing.events.EventObserver();
+  goog.events.listen(rootNode.getEventTarget(),
+      mc.ds.RootNode.EventType.ERROR, observer);
+  rootNode.sendInitRequest_(2);
+  mockClock.tick(1);
+  rootNode.handleInitSuccessMessage_({'init_success': [
+      rootNode.initRequestToken_, 'abc', 2, null, []]});
+  assertEquals(0, observer.getEvents().length);
+  rootNode.sendInitRequest_(2);
+  mockClock.tick(mc.ds.RootNode.INIT_REQUEST_TIMEOUT - 1);
+  assertEquals(0, observer.getEvents().length);
+  mockClock.tick(2);
+  assertEquals(1, observer.getEvents().length);
+  assertEquals(false, rootNode.minCheckDelay_.isActive());
+  assertEquals(false, rootNode.maxCheckDelay_.isActive());
+  assertEquals(false, rootNode.checkPending_)
+};
+
+
+var testInitFailureMessage = function() {
+  var rootNode = getRootNode();
+  var observer = new goog.testing.events.EventObserver();
+  goog.events.listen(rootNode.getEventTarget(),
+      mc.ds.RootNode.EventType.ERROR, observer);
+
+  rootNode.handleInitFailureMessage_({'init_failure': 'wrong_token'});
+  assertEquals(0, observer.getEvents().length);
+
+  rootNode.sendInitRequest_(2);
+  rootNode.handleInitFailureMessage_({'init_failure': 'wrong_token'});
+  assertEquals(0, observer.getEvents().length);
+
+  rootNode.handleInitFailureMessage_({'init_failure':
+      rootNode.initRequestToken_});
+  assertEquals(1, observer.getEvents().length);
+  assertEquals(null, rootNode.initRequestToken_);
+  assertEquals(false, rootNode.initRequestTimeoutDelay_.isActive());
+  assertEquals(false, rootNode.minCheckDelay_.isActive());
+  assertEquals(false, rootNode.maxCheckDelay_.isActive());
+  assertEquals(false, rootNode.checkPending_)
+};
+
+
+var testHandleOutcomesMessage = function() {
+  var data = {'a': {}, 'b': {}, 'd': {}};
+  data['a'][mc.ds.DATA_KEYS_.VALUE] = mc.ds.encodeValue_([0]);
+  data['b'][mc.ds.DATA_KEYS_.VALUE] = mc.ds.encodeValue_([0]);
+  data['d'][mc.ds.DATA_KEYS_.VALUE] = mc.ds.encodeValue_([0]);
+  var rootNode = getRootNode(data, 4);
+
+  var applyReceivedUpdatesCallCount = 0;
+  rootNode.applyReceivedUpdates_ = function() {
+    applyReceivedUpdatesCallCount++;
+  };
+  var startOrStopSendDelayCallCount = 0;
+  rootNode.startOrStopSendDelay_ = function() {
+    startOrStopSendDelayCallCount++;
+  };
+  var observer = new goog.testing.events.EventObserver();
+  goog.events.listen(rootNode.getEventTarget(),
+      mc.ds.RootNode.EventType.ROLLBACK, observer);
+  goog.events.listen(rootNode.getEventTarget(),
+      mc.ds.RootNode.EventType.SAVED_STATUS_CHANGE, observer);
+
+  // Use the fact that startOrStopSendDelay_ wasn't called as indication that
+  // function returned early.
+  rootNode.handleOutcomesMessage_({'outcomes': ['wrong_token']});
+  assertEquals(0, startOrStopSendDelayCallCount);
+
+  rootNode.handleOutcomesMessage_({'outcomes': [rootNode.inMemoryStateToken_,
+      1]});
+  assertEquals(0, startOrStopSendDelayCallCount);
+
+  rootNode.set(['a'], [1]);
+  rootNode.set(['a'], [2]);
+  rootNode.inTransaction(function() {
+    rootNode.set(['d'], [1]);
+    rootNode.set(['d'], [2]);
+  });
+  rootNode.inTransaction(function() {
+    rootNode.set(['b'], [2]);
+    rootNode.set(['c'], [3]);
+  });
+  rootNode.set(['e'], [1]);
+  startOrStopSendDelayCallCount = 0;
+
+  // Simulate sending updates to server.
+  rootNode.sentUpdates_ = rootNode.bufferedUpdates_;
+  rootNode.bufferedUpdates_ = [];
+
+  observer.events_ = [];
+  assertEquals(false, rootNode.lastChangesSavedStatus_);
+  rootNode.handleOutcomesMessage_({'outcomes': [
+    rootNode.inMemoryStateToken_,
+    4,
+    [
+      null,
+      null,
+      null,
+      10,
+      11
+    ]
+  ]});
+  assertObjectEquals([0], rootNode.get(['a']));
+  assertObjectEquals([0], rootNode.get(['d']));
+  assertObjectEquals([
+    [
+      {path: ['b'], newValue: mc.ds.encodeValue_([2]),
+          oldValue: mc.ds.encodeValue_([0]), version: 9},
+      {path: ['c'], newValue: mc.ds.encodeValue_([3]),
+          oldValue: null, version: 10}
+    ],
+    [
+      {path: ['e'], newValue: mc.ds.encodeValue_([1]),
+          oldValue: null, version: 11}
+    ]
+  ], rootNode.committedUpdates_);
+  assertObjectEquals([], rootNode.sentUpdates_);
+  assertEquals(1, observer.getEvents(
+      mc.ds.RootNode.EventType.ROLLBACK).length);
+  assertEquals(false, rootNode.areChangesSaved());
+  assertEquals(0, observer.getEvents(
+      mc.ds.RootNode.EventType.SAVED_STATUS_CHANGE).length);
+  assertEquals(1, applyReceivedUpdatesCallCount);
+  assertEquals(1, startOrStopSendDelayCallCount);
+};
+
+
+var testHandleUpdatesMessage = function() {
+  var rootNode = getRootNode();
+  var applyReceivedUpdatesCallCount = 0;
+  rootNode.applyReceivedUpdates_ = function() {
+    applyReceivedUpdatesCallCount++;
+  };
+  var processServerUpdatesCalls = [];
+  rootNode.processServerUpdates_ = function(updates) {
+    processServerUpdatesCalls.push(updates);
+  };
+  rootNode.handleMessage_({'updates': ['wrong_token']});
+  assertEquals(0, applyReceivedUpdatesCallCount);
+  assertEquals(0, processServerUpdatesCalls.length);
+
+  rootNode.handleMessage_({'updates': ['abc', ['updates']]});
+  assertEquals(1, applyReceivedUpdatesCallCount);
+  assertObjectEquals([['updates']], processServerUpdatesCalls);
+};
+
+
+var testHandleSavedMessage = function() {
+  var rootNode = getRootNode();
+  var advanceDiskVersionCalls = [];
+  rootNode.advanceDiskVersion_ = function(version) {
+    advanceDiskVersionCalls.push(version);
+  };
+  rootNode.handleMessage_({'saved': ['wrong_token', 4]});
+  assertObjectEquals([], advanceDiskVersionCalls);
+  assertEquals(2, rootNode.diskVersion_);
+  rootNode.handleMessage_({'saved': ['abc', 2]});
+  assertObjectEquals([], advanceDiskVersionCalls);
+  rootNode.handleMessage_({'saved': ['abc', 3]});
+  assertObjectEquals([3], advanceDiskVersionCalls);
+};
+
+
+var testHandleFlushMessage = function() {
+  var rootNode = getRootNode();
+  var sendInitRequestCalls = [];
+  rootNode.sendInitRequest_ = function(version) {
+    sendInitRequestCalls.push(version);
+  };
+  rootNode.handleMessage_({'flush': 'wrong_token'});
+  assertObjectEquals([], sendInitRequestCalls);
+  rootNode.handleMessage_({'flush': 'abc'});
+  assertObjectEquals([2], sendInitRequestCalls);
+};
+
+
+var testCheckForUpdatesTimers = function() {
+  var rootNode = getRootNode();
+  rootNode.channel_.sentMessages_.events_ = [];
+  mockClock.tick(mc.ds.RootNode.MAX_CHECK_DELAY - 1);
+  assertObjectEquals([], rootNode.channel_.sentMessages_.getEvents());
+  mockClock.tick(2);
+  assertObjectEquals([{service: 'service1', payload:
+      {'init': [2, rootNode.initRequestToken_]}}],
+      rootNode.channel_.sentMessages_.getEvents());
+  rootNode.channel_.sentMessages_.events_ = [];
+  mockClock.tick(1000);
+  rootNode.handleInitSuccessMessage_({'init_success': [
+      rootNode.initRequestToken_, 'abc', 2, null, []]});
+  mockClock.tick(mc.ds.RootNode.MIN_CHECK_DELAY - 1);
+  rootNode.channel_.send('service2', 'hello');
+  assertObjectEquals('No extra messages', [{service: 'service2', payload:
+      'hello'}],
+      rootNode.channel_.sentMessages_.getEvents());
+  rootNode.channel_.sentMessages_.events_ = [];
+  mockClock.tick(2);
+  rootNode.channel_.send('service2', 'hello');
+  assertObjectEquals('Extra message', [
+    {service: 'service2', payload: 'hello'},
+    {service: 'service1', payload: {'init': [2, rootNode.initRequestToken_]}}
+  ], rootNode.channel_.sentMessages_.getEvents());
+};
+
+
+var testRootNodeDisposal = function() {
+  var rootNode = getRootNode();
+  rootNode.dispose();
+  assertObjectEquals([{service: 'service1', payload: {'disconnect': null}}],
+      rootNode.channel_.sentMessages_.getEvents());
+  assertTrue(rootNode.isDisposed());
+  assertFalse(rootNode.channel_.isDisposed());
+};
+
+
+var testDefineType = function() {
+  mc.ds.defineType('A', {'a0': {'*': {'@': 'Number'}}});
+  mc.ds.defineType('B', 'A');
+  assertObjectEquals({
+    'A': {'a0': {'*': {'@': 'Number'}}},
+    'B': 'A'
+  }, mc.ds.schema_);
+  checkAssert(function() {
+    mc.ds.defineType('A');
+  }, 'Type already registered.');
+  checkAssert(function() {
+    mc.ds.defineType('Number');
+  }, 'Type name clashes with a value type.');
+  checkAssert(function() {
+    mc.ds.defineType('C', function() {});
+  }, 'Schema must only contain strings or' +
+      ' objects other than arrays and functions.');
+  checkAssert(function() {
+    mc.ds.defineType('E', {'*': 'Number', 'b': 'Number'});
+  }, 'If an object in the schema contains a wildcard key,' +
+      ' this object should have no other keys.');
+};
+
+
+var testSchemaDealias = function() {
+  mc.ds.defineType('A', {'a0': 'Number'});
+  mc.ds.defineType('B', 'A');
+  mc.ds.defineType('C', 'B');
+  assertEquals('Number', mc.ds.schemaDealias_('Number'));
+  assertObjectEquals({'a0': 'Number'}, mc.ds.schemaDealias_({'a0': 'Number'}));
+  assertObjectEquals({'a0': 'Number'}, mc.ds.schemaDealias_('A'));
+  assertObjectEquals({'a0': 'Number'}, mc.ds.schemaDealias_('B'));
+  assertObjectEquals({'a0': 'Number'}, mc.ds.schemaDealias_('C'));
+  checkAssert(function() {
+    mc.ds.schemaDealias_('D');
+  }, 'Schema references type \'D\' which is not defined.');
+};
+
+
+var testSchemaGetChild = function() {
+  assertObjectEquals('Number', mc.ds.schemaGetChild_({'*': 'Number'}, 'a0'));
+  assertObjectEquals('Number', mc.ds.schemaGetChild_({'a0': 'Number'}, 'a0'));
+  assertObjectEquals(null, mc.ds.schemaGetChild_({'a0': 'Number'}, 'b0'));
+};
+
+
+var testSchemaGet = function() {
+  mc.ds.defineType('A', {'a1': 'Number'});
+  mc.ds.defineType('B', {'a0': 'A'});
+  assertObjectEquals({'a0': 'A'}, mc.ds.schemaGet_([], {'a0': 'A'}, []));
+  assertObjectEquals({'a1': 'Number'},
+      mc.ds.schemaGet_([], {'a0': 'A'}, ['a0']));
+  assertObjectEquals('Number',
+      mc.ds.schemaGet_([], {'a0': 'A'}, ['a0', 'a1']));
+  checkAssert(function() {
+    mc.ds.schemaGet_(['a0'], {'a1': 'Number'}, ['a1', 'a2']);
+  }, 'Invalid path \'a0/a1/a2\': according to schema, prefix \'a0/a1\'' +
+      ' points to a value.');
+  checkAssert(function() {
+    mc.ds.schemaGet_(['a0'], {'a1': 'Number'}, ['b1']);
+  }, 'Invalid path \'a0/b1\': unexpected path element \'b1\' following' +
+      ' \'a0\'.');
+};
+
+
+var testSchemaForEach = function() {
+  mc.ds.defineType('A', {
+    'a1': {'a2': 'Number'},
+    'b1': {'a2': 'Boolean'},
+    'c1': {'b2': 'String'}
+  });
+  mc.ds.defineType('B', {'a0': 'A'});
+  var els = [];
+  var contextObj = {};
+  mc.ds.schemaForEach_({'a0': 'A'}, ['a0', '*', 'a2'], function(el) {
+    assertEquals('Should be called in correct context', contextObj, this);
+    els.push(el);
+  }, contextObj);
+  assertSameElements('Should have iterated over correct elements',
+      ['Number', 'Boolean'], els);
+  els = [];
+  var retval = mc.ds.schemaForEach_({'a0': 'A'}, ['a0', '*', 'a2'],
+    function(el) {
+        assertEquals('Should be called in correct context', contextObj, this);
+        els.push(el);
+        return 3;
+      }, contextObj);
+  assertEquals(3, retval);
+  assertEquals('Should have iterated over 1 element', 1, els.length);
+};
+
+
+var testSchemaChecks = function() {
+  mc.ds.defineType('A', {'a0': 'Number', 'c0': 'EventPath', 'd0': 'Counter'});
+  var rootNode = getRootNode();
+  mc.ds.setType(rootNode, 'A');
+
+  // Test getNode
+  rootNode.getNode(['a0']);
+  checkAssert(function() {
+    rootNode.getNode(['b0']);
+  }, 'Invalid path \'b0\': unexpected path element \'b0\' following \'\'.');
+
+  // Test forEachNode
+  rootNode.forEachNode(['a0'], function() {});
+  checkAssert(function() {
+    rootNode.forEachNode(['b0'], function() {});
+  }, 'Called forEachNode for path \'b0\' which according to schema' +
+      ' will never match any nodes.');
+
+  // Test get
+  rootNode.get(['a0']);
+  checkAssert(function() {
+    rootNode.get([]);
+  }, 'Called get for path \'\' which according to schema does not point' +
+      ' to a value.');
+
+  // Test forEach
+  rootNode.forEach(['a0'], function() {});
+  checkAssert(function() {
+    rootNode.forEach(['b0'], function() {});
+  }, 'Called forEach for path \'b0\' which according to schema' +
+      ' will never match any values.');
+
+  // Test set
+  rootNode.set(['a0'], 1);
+  rootNode.set(['a0'], null);
+  checkAssert(function() {
+    rootNode.set(['a0'], 'abc');
+  }, 'Invalid value type: expected Number at path \'a0\'.');
+
+  // Test listen
+  rootNode.listen(['a0'], function() {});
+  checkAssert(function() {
+    rootNode.listen(['b0'], function() {});
+  }, 'Called listen for path \'b0\' which according to schema' +
+      ' will never match any events.');
+
+  // Test dispatchEvent
+  rootNode.dispatchEvent(new mc.ds.Event(['c0']));
+  checkAssert(function() {
+    rootNode.dispatchEvent(new mc.ds.Event(['a0']));
+  }, 'Tried to dispatch a custom event for path \'a0\' which ' +
+      ' according to schema can match an element other' +
+      ' than \'EventPath\'');
+  checkAssert(function() {
+    rootNode.dispatchEvent(new mc.ds.Event(['b0']));
+  }, 'Tried to dispatch a custom event for path \'b0\' which ' +
+      ' according to schema does not match an \'EventPath\'');
+};
+
+
+</script>
+</body>
+</html>
