@@ -6,6 +6,8 @@ MightyClient is implemented on the client side in Closure Compiler-annotated Jav
 
 For details not covered in this document, you can refer to the well-documented source code, the demo app and the unit tests.
 
+The code is licensed under Apache 2.0 license.
+
 
 ## Structure ##
 
