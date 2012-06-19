@@ -215,7 +215,7 @@ The only other thing you need to do is to essentially publish a datasource, defi
         class DemoDatasource(DatasourceService):
           def __init__(self, name, client_id):
             super(DemoDatasource, self).__init__(name, client_id)
-            self.datasource_key = ndb.Key('Datasource', name)
+            self.datasource_key = ndb.Key('Datasource', name[5:])
             self.access_mode = 'rw'
 
         mc_channel_SERVICES = [
