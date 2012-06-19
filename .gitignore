@@ -2,3 +2,4 @@
 /closure-library/
 /temp/
 .DS_Store
+*.pyc
