@@ -219,7 +219,7 @@ The only other thing you need to do is to essentially publish a datasource, defi
             self.access_mode = 'rw'
 
         mc_channel_SERVICES = [
-          ('.*', DemoDatasource),
+          ('demo/.*', DemoDatasource),
         ]
 
 Remember the `channel.Service` class from "Channel: Server" section above? Server-side functionality is implemented as a subclass `datasource.DatasourceService` of that class. What you do is you define your own service of a particular kind, a 'datasource service', by subclassing `datasource.DatasourceService`. The one thing you need to add in your implementation is you should override constructor to do three things, in any order:
